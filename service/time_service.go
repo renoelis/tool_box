@@ -3,6 +3,7 @@ package service
 import (
 	"github.com/renoz/toolbox-api/model"
 	"github.com/renoz/toolbox-api/utils"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -91,6 +92,34 @@ func getTimezoneInfo(timezoneName string, tzOffset *int) (*model.TimezoneInfo, e
 
 // 将Python风格的时间格式转换为Go风格的格式
 func convertPythonFormatToGo(pythonFormat string) string {
+	// 如果是空格式，返回默认格式
+	if pythonFormat == "" {
+		return "2006-01-02 15:04:05"
+	}
+	
+	// 处理直接对应的Python到Go格式映射
+	result := pythonFormat
+	
+	// 检查特殊情况，整个格式是否为特定格式
+	if pythonFormat == "%c" {
+		return "Mon Jan 2 15:04:05 2006" // ANSIC 格式
+	} else if pythonFormat == "%x" {
+		return "01/02/06" // 日期格式
+	} else if pythonFormat == "%X" {
+		return "15:04:05" // 时间格式
+	}
+	
+	// 包含特殊处理的格式
+	// 这些指令需要特殊处理，不能直接映射到Go时间格式
+	var specialDirectives = []string{"%U", "%W", "%w", "%j", "%V", "%u"}
+	for _, directive := range specialDirectives {
+		if strings.Contains(pythonFormat, directive) {
+			// 这些特殊格式需要自定义处理，不使用直接替换
+			return pythonFormat
+		}
+	}
+	
+	// 进行常规替换
 	// Python格式到Go格式的映射表
 	formatMap := map[string]string{
 		"%Y": "2006",     // 年份（4位数字）
@@ -109,29 +138,150 @@ func convertPythonFormatToGo(pythonFormat string) string {
 		"%p": "PM",       // AM/PM
 		"%z": "-0700",    // UTC偏移量
 		"%Z": "MST",      // 时区名称
-		"%j": "002",      // 一年中的第几天（001-366）
-		"%U": "01",       // 一年中的第几周（00-53），以周日为一周的开始
-		"%W": "01",       // 一年中的第几周（00-53），以周一为一周的开始
 		"%%": "%",        // 百分号
-		// %w 留给外部处理，这里暂不转换
-	}
-	
-	// 特殊格式的完全匹配
-	specialFormats := map[string]string{
-		// %c 不再硬编码，留给外部处理
-		"%x": "2006年01月02日",              // 本地日期表示
-		"%X": "15:04:05",                 // 本地时间表示
-	}
-	
-	// 先检查是否是完全匹配的特殊格式
-	if specialFormat, ok := specialFormats[pythonFormat]; ok {
-		return specialFormat
+		// 不添加 %V、%u、%w、%j、%U、%W 因为它们需要特殊处理
 	}
 	
 	// 使用替换处理所有格式代码
-	result := pythonFormat
 	for pyFmt, goFmt := range formatMap {
 		result = strings.Replace(result, pyFmt, goFmt, -1)
+	}
+	
+	return result
+}
+
+// 格式化指定日期时间（处理包含特殊Python格式的情况）
+func formatWithPythonFormat(t time.Time, pythonFormat string) string {
+	// 获取1月1日，用于计算周数
+	jan1 := time.Date(t.Year(), time.January, 1, 0, 0, 0, 0, t.Location())
+	jan1Weekday := int(jan1.Weekday()) // Sunday=0
+	
+	// 特殊格式直接处理
+	if pythonFormat == "%c" {
+		return t.Format("Mon Jan 2 15:04:05 2006")
+	} else if pythonFormat == "%x" {
+		return t.Format("01/02/06")
+	} else if pythonFormat == "%X" {
+		return t.Format("15:04:05")
+	}
+	
+	// 识别格式字符串中的所有Python指令
+	var directives = []string{
+		"%Y", "%y", "%m", "%B", "%b", "%d", "%j", "%U", "%W", "%V", 
+		"%A", "%a", "%w", "%u", "%H", "%I", "%p", "%M", "%S", "%f",
+		"%z", "%Z", "%c", "%x", "%X", "%%",
+	}
+	
+	// 特殊计算函数：计算周数
+	weekNumber := func(doy, jan1Weekday int, firstDay int) int {
+		// firstDay: 0=Sunday, 1=Monday
+		offset := (7 - ((jan1Weekday - firstDay + 7) % 7)) % 7
+		if doy-1 < offset {
+			return 0
+		}
+		return (doy-1-offset)/7 + 1
+	}
+	
+	// 检查是否需要特殊处理
+	needsSpecialHandling := false
+	for _, directive := range []string{"%U", "%W", "%w", "%j", "%V", "%u"} {
+		if strings.Contains(pythonFormat, directive) {
+			needsSpecialHandling = true
+			break
+		}
+	}
+	
+	// 如果不需要特殊处理，使用常规转换
+	if !needsSpecialHandling {
+		goFormat := convertPythonFormatToGo(pythonFormat)
+		return t.Format(goFormat)
+	}
+	
+	// 需要特殊处理，逐个替换指令
+	result := pythonFormat
+	
+	// 依次处理每个指令
+	for _, directive := range directives {
+		// 如果格式中不包含该指令，跳过
+		if !strings.Contains(result, directive) {
+			continue
+		}
+		
+		var replacement string
+		
+		switch directive {
+		case "%Y":
+			replacement = fmt.Sprintf("%04d", t.Year())
+		case "%y":
+			replacement = fmt.Sprintf("%02d", t.Year()%100)
+		case "%m":
+			replacement = fmt.Sprintf("%02d", int(t.Month()))
+		case "%B":
+			replacement = t.Month().String()
+		case "%b":
+			replacement = t.Month().String()[:3]
+		case "%d":
+			replacement = fmt.Sprintf("%02d", t.Day())
+		case "%j":
+			replacement = fmt.Sprintf("%03d", t.YearDay())
+		case "%U": // 以周日为一周的第一天
+			week := weekNumber(t.YearDay(), jan1Weekday, 0)
+			replacement = fmt.Sprintf("%02d", week)
+		case "%W": // 以周一为一周的第一天
+			week := weekNumber(t.YearDay(), jan1Weekday, 1)
+			replacement = fmt.Sprintf("%02d", week)
+		case "%V": // ISO标准周数
+			_, isoWeek := t.ISOWeek()
+			replacement = fmt.Sprintf("%02d", isoWeek)
+		case "%A":
+			replacement = t.Weekday().String()
+		case "%a":
+			replacement = t.Weekday().String()[:3]
+		case "%w":
+			replacement = fmt.Sprintf("%d", int(t.Weekday()))
+		case "%u": // ISO周几（1-7，周一到周日）
+			weekday := int(t.Weekday())
+			if weekday == 0 { // 周日
+				weekday = 7
+			}
+			replacement = fmt.Sprintf("%d", weekday)
+		case "%H":
+			replacement = fmt.Sprintf("%02d", t.Hour())
+		case "%I":
+			hour12 := t.Hour() % 12
+			if hour12 == 0 {
+				hour12 = 12
+			}
+			replacement = fmt.Sprintf("%02d", hour12)
+		case "%p":
+			if t.Hour() < 12 {
+				replacement = "AM"
+			} else {
+				replacement = "PM"
+			}
+		case "%M":
+			replacement = fmt.Sprintf("%02d", t.Minute())
+		case "%S":
+			replacement = fmt.Sprintf("%02d", t.Second())
+		case "%f":
+			micro := t.Nanosecond() / 1000
+			replacement = fmt.Sprintf("%06d", micro)
+		case "%z":
+			replacement = t.Format("-0700")
+		case "%Z":
+			replacement = t.Format("MST")
+		case "%c":
+			replacement = t.Format(time.ANSIC)
+		case "%x":
+			replacement = t.Format("01/02/06")
+		case "%X":
+			replacement = t.Format("15:04:05")
+		case "%%":
+			replacement = "%"
+		}
+		
+		// 替换指令
+		result = strings.Replace(result, directive, replacement, -1)
 	}
 	
 	return result
@@ -158,9 +308,8 @@ func formatTime(t time.Time, format string, customFormat string) string {
 		return strconv.FormatInt(t.UnixNano()/1e6, 10)
 	case "custom":
 		if customFormat != "" {
-			// 普通情况直接转换
-			goFormat := convertPythonFormatToGo(customFormat)
-			return t.Format(goFormat)
+			// 使用改进的格式处理函数
+			return formatWithPythonFormat(t, customFormat)
 		}
 		return t.Format("2006-01-02 15:04:05")
 	default:
@@ -198,126 +347,15 @@ func GetCurrentTime(format, timezone string, tzOffset *int, customFormat string)
 	// 记录原始自定义格式（用于返回）
 	rawCustomFormat := customFormat
 	
-	// 特殊处理各种格式
+	// 格式化输出
 	var formattedTime string
 	
 	if format == "custom" && customFormat != "" {
-		// 处理特殊格式%c
-		if customFormat == "%c" {
-			// 标准C语言格式: "Sun May 18 14:26:36 2025"
-			formattedTime = now.Format("Mon Jan 2 15:04:05 2006")
-		} else if customFormat == "%U" {
-			// %U: 一年中的第几周，以周日为一周的开始（00-53）
-			weekNumber := utils.GetWeekNumberInYear(now, false) // false表示以周日为开始
-			
-			// 确保是两位数格式
-			weekNumberStr := strconv.Itoa(weekNumber)
-			if weekNumber < 10 {
-				weekNumberStr = "0" + weekNumberStr
-			}
-			
-			formattedTime = weekNumberStr
-		} else if strings.Contains(customFormat, "%U") {
-			// 包含%U的复杂格式
-			weekNumber := utils.GetWeekNumberInYear(now, false) // false表示以周日为开始
-			
-			// 确保是两位数格式
-			weekNumberStr := strconv.Itoa(weekNumber)
-			if weekNumber < 10 {
-				weekNumberStr = "0" + weekNumberStr
-			}
-			
-			// 使用特殊占位符替换%U
-			const placeholder = "WEEKNUMBER_PLACEHOLDER_U"
-			tempFormat := strings.Replace(customFormat, "%U", placeholder, -1)
-			
-			// 转换其他Python格式为Go格式
-			goFormat := convertPythonFormatToGo(tempFormat)
-			
-			// 使用Go的时间格式化
-			tempResult := now.Format(goFormat)
-			
-			// 最后将占位符替换为实际的周数
-			formattedTime = strings.Replace(tempResult, placeholder, weekNumberStr, -1)
-		} else if strings.Contains(customFormat, "%w") {
-			// 使用手动替换方法处理包含%w的格式
-			// 首先替换所有格式标记
-			result := customFormat
-			
-			// 处理年份
-			if strings.Contains(result, "%Y") {
-				result = strings.Replace(result, "%Y", strconv.Itoa(now.Year()), -1)
-			}
-			
-			// 处理月份
-			if strings.Contains(result, "%m") {
-				month := int(now.Month())
-				monthStr := strconv.Itoa(month)
-				if month < 10 {
-					monthStr = "0" + monthStr
-				}
-				result = strings.Replace(result, "%m", monthStr, -1)
-			}
-			
-			// 处理日期
-			if strings.Contains(result, "%d") {
-				day := now.Day()
-				dayStr := strconv.Itoa(day)
-				if day < 10 {
-					dayStr = "0" + dayStr
-				}
-				result = strings.Replace(result, "%d", dayStr, -1)
-			}
-			
-			// 处理小时（24小时制）
-			if strings.Contains(result, "%H") {
-				hour := now.Hour()
-				hourStr := strconv.Itoa(hour)
-				if hour < 10 {
-					hourStr = "0" + hourStr
-				}
-				result = strings.Replace(result, "%H", hourStr, -1)
-			}
-			
-			// 处理分钟
-			if strings.Contains(result, "%M") {
-				minute := now.Minute()
-				minuteStr := strconv.Itoa(minute)
-				if minute < 10 {
-					minuteStr = "0" + minuteStr
-				}
-				result = strings.Replace(result, "%M", minuteStr, -1)
-			}
-			
-			// 处理秒
-			if strings.Contains(result, "%S") {
-				second := now.Second()
-				secondStr := strconv.Itoa(second)
-				if second < 10 {
-					secondStr = "0" + secondStr
-				}
-				result = strings.Replace(result, "%S", secondStr, -1)
-			}
-			
-			// 最后处理星期几
-			weekday := int(now.Weekday())
-			weekdayStr := strconv.Itoa(weekday)
-			result = strings.Replace(result, "%w", weekdayStr, -1)
-			
-			formattedTime = result
-		} else {
-			// 不包含%w的自定义格式
-			goFormat := convertPythonFormatToGo(customFormat)
-			formattedTime = now.Format(goFormat)
-		}
+		// 使用新的格式处理函数
+		formattedTime = formatWithPythonFormat(now, customFormat)
 	} else {
 		// 非自定义格式
 		formattedTime = formatTime(now, format, customFormat)
-	}
-	
-	// 如果是自定义格式，记录实际使用的格式
-	if format == "custom" && customFormat != "" {
-		customFormat = rawCustomFormat
 	}
 	
 	// 添加额外的响应字段
@@ -334,7 +372,7 @@ func GetCurrentTime(format, timezone string, tzOffset *int, customFormat string)
 		Second:       now.Second(),
 		Timestamp:    now.Unix(),
 		Weekday:      int(now.Weekday()),  // 正确的星期几 (0-6)
-		CustomFormat: customFormat, 
+		CustomFormat: rawCustomFormat, 
 	}
 	
 	return response, nil
@@ -587,118 +625,12 @@ func ConvertTime(req model.TimeConvertRequest) (*model.TimeConvertResponse, erro
 	// 转换时区
 	inputTime = inputTime.In(loc)
 	
-	// 格式化输出，与GetCurrentTime保持一致的处理逻辑
+	// 格式化输出
 	var formattedTime string
 	
 	if req.OutputFormat == "custom" && req.CustomFormat != "" {
-		// 处理特殊格式%c
-		if req.CustomFormat == "%c" {
-			// 标准C语言格式: "Sun May 18 14:26:36 2025"
-			formattedTime = inputTime.Format("Mon Jan 2 15:04:05 2006")
-		} else if req.CustomFormat == "%U" {
-			// %U: 一年中的第几周，以周日为一周的开始（00-53）
-			weekNumber := utils.GetWeekNumberInYear(inputTime, false) // false表示以周日为开始
-			
-			// 确保是两位数格式
-			weekNumberStr := strconv.Itoa(weekNumber)
-			if weekNumber < 10 {
-				weekNumberStr = "0" + weekNumberStr
-			}
-			
-			formattedTime = weekNumberStr
-		} else if strings.Contains(req.CustomFormat, "%U") {
-			// 包含%U的复杂格式
-			weekNumber := utils.GetWeekNumberInYear(inputTime, false) // false表示以周日为开始
-			
-			// 确保是两位数格式
-			weekNumberStr := strconv.Itoa(weekNumber)
-			if weekNumber < 10 {
-				weekNumberStr = "0" + weekNumberStr
-			}
-			
-			// 使用特殊占位符替换%U
-			const placeholder = "WEEKNUMBER_PLACEHOLDER_U"
-			tempFormat := strings.Replace(req.CustomFormat, "%U", placeholder, -1)
-			
-			// 转换其他Python格式为Go格式
-			goFormat := convertPythonFormatToGo(tempFormat)
-			
-			// 使用Go的时间格式化
-			tempResult := inputTime.Format(goFormat)
-			
-			// 最后将占位符替换为实际的周数
-			formattedTime = strings.Replace(tempResult, placeholder, weekNumberStr, -1)
-		} else if strings.Contains(req.CustomFormat, "%w") {
-			// 使用手动替换方法处理包含%w的格式
-			// 首先替换所有格式标记
-			result := req.CustomFormat
-			
-			// 处理年份
-			if strings.Contains(result, "%Y") {
-				result = strings.Replace(result, "%Y", strconv.Itoa(inputTime.Year()), -1)
-			}
-			
-			// 处理月份
-			if strings.Contains(result, "%m") {
-				month := int(inputTime.Month())
-				monthStr := strconv.Itoa(month)
-				if month < 10 {
-					monthStr = "0" + monthStr
-				}
-				result = strings.Replace(result, "%m", monthStr, -1)
-			}
-			
-			// 处理日期
-			if strings.Contains(result, "%d") {
-				day := inputTime.Day()
-				dayStr := strconv.Itoa(day)
-				if day < 10 {
-					dayStr = "0" + dayStr
-				}
-				result = strings.Replace(result, "%d", dayStr, -1)
-			}
-			
-			// 处理小时（24小时制）
-			if strings.Contains(result, "%H") {
-				hour := inputTime.Hour()
-				hourStr := strconv.Itoa(hour)
-				if hour < 10 {
-					hourStr = "0" + hourStr
-				}
-				result = strings.Replace(result, "%H", hourStr, -1)
-			}
-			
-			// 处理分钟
-			if strings.Contains(result, "%M") {
-				minute := inputTime.Minute()
-				minuteStr := strconv.Itoa(minute)
-				if minute < 10 {
-					minuteStr = "0" + minuteStr
-				}
-				result = strings.Replace(result, "%M", minuteStr, -1)
-			}
-			
-			// 处理秒
-			if strings.Contains(result, "%S") {
-				second := inputTime.Second()
-				secondStr := strconv.Itoa(second)
-				if second < 10 {
-					secondStr = "0" + secondStr
-				}
-				result = strings.Replace(result, "%S", secondStr, -1)
-			}
-			
-			// 最后处理星期几
-			weekday := int(inputTime.Weekday())
-			weekdayStr := strconv.Itoa(weekday)
-			result = strings.Replace(result, "%w", weekdayStr, -1)
-			
-			formattedTime = result
-		} else {
-			// 不包含%w的自定义格式
-			goFormat := convertPythonFormatToGo(req.CustomFormat)
-			formattedTime = inputTime.Format(goFormat)
-		}
+		// 使用新的格式处理函数
+		formattedTime = formatWithPythonFormat(inputTime, req.CustomFormat)
 	} else {
 		// 非自定义格式
 		formattedTime = formatTime(inputTime, req.OutputFormat, req.CustomFormat)
