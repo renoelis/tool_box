@@ -411,6 +411,71 @@ func GetWeekNumber(dateStr string, inMonth bool, startWithMonday bool) (*model.W
 		startDay = "周日"
 	}
 	
+	// 计算总周数
+	var totalWeeks int
+	if inMonth {
+		// 获取月份的总天数
+		year, month, _ := date.Date()
+		lastDay := time.Date(year, month+1, 0, 0, 0, 0, 0, date.Location())
+		daysInMonth := lastDay.Day()
+		
+		// 获取月份第一天和最后一天的weekday
+		firstDay := time.Date(year, month, 1, 0, 0, 0, 0, date.Location())
+		
+		// 计算月份总周数
+		var firstWeekOffset int
+		if startWithMonday {
+			// 周一为每周第一天
+			firstWeekday := int(firstDay.Weekday())
+			if firstWeekday == 0 { // 周日
+				firstWeekday = 7
+			}
+			firstWeekOffset = firstWeekday - 1
+		} else {
+			// 周日为每周第一天
+			firstWeekOffset = int(firstDay.Weekday())
+		}
+		
+		// 计算总周数
+		totalWeeks = (daysInMonth + firstWeekOffset - 1) / 7 + 1
+	} else {
+		// 年份总周数
+		if startWithMonday {
+			// ISO周计算法
+			// 获取当年12月31日所在的周
+			lastDay := time.Date(date.Year(), 12, 31, 0, 0, 0, 0, date.Location())
+			_, lastWeek := lastDay.ISOWeek()
+			
+			// 处理特殊情况：年末几天可能属于下一年的第一周
+			if lastWeek == 1 {
+				// 检查12月30日
+				prevDay := lastDay.AddDate(0, 0, -1)
+				_, prevWeek := prevDay.ISOWeek()
+				totalWeeks = prevWeek
+			} else {
+				totalWeeks = lastWeek
+			}
+		} else {
+			// 基于周日的计算法
+			firstDay := time.Date(date.Year(), 1, 1, 0, 0, 0, 0, date.Location())
+			
+			// 计算当年第一天的偏移
+			firstDayOffset := int(firstDay.Weekday())
+			
+			// 获取当年总天数
+			daysInYear := 365
+			if date.Year()%4 == 0 && (date.Year()%100 != 0 || date.Year()%400 == 0) {
+				daysInYear = 366 // 闰年
+			}
+			
+			// 计算总周数
+			totalWeeks = (daysInYear + firstDayOffset) / 7
+			if (daysInYear + firstDayOffset) % 7 > 0 {
+				totalWeeks++
+			}
+		}
+	}
+	
 	return &model.WeekNumberResponse{
 		Date:        date.Format("2006-01-02"),
 		WeekNumber:  weekNumber,
@@ -418,6 +483,7 @@ func GetWeekNumber(dateStr string, inMonth bool, startWithMonday bool) (*model.W
 		WeekdayName: utils.WeekdayNames[weekday],
 		InMonth:     inMonth,
 		StartDay:    startDay,
+		TotalWeeks:  totalWeeks,
 	}, nil
 }
 
@@ -521,8 +587,122 @@ func ConvertTime(req model.TimeConvertRequest) (*model.TimeConvertResponse, erro
 	// 转换时区
 	inputTime = inputTime.In(loc)
 	
-	// 格式化输出
-	formattedTime := formatTime(inputTime, req.OutputFormat, req.CustomFormat)
+	// 格式化输出，与GetCurrentTime保持一致的处理逻辑
+	var formattedTime string
+	
+	if req.OutputFormat == "custom" && req.CustomFormat != "" {
+		// 处理特殊格式%c
+		if req.CustomFormat == "%c" {
+			// 标准C语言格式: "Sun May 18 14:26:36 2025"
+			formattedTime = inputTime.Format("Mon Jan 2 15:04:05 2006")
+		} else if req.CustomFormat == "%U" {
+			// %U: 一年中的第几周，以周日为一周的开始（00-53）
+			weekNumber := utils.GetWeekNumberInYear(inputTime, false) // false表示以周日为开始
+			
+			// 确保是两位数格式
+			weekNumberStr := strconv.Itoa(weekNumber)
+			if weekNumber < 10 {
+				weekNumberStr = "0" + weekNumberStr
+			}
+			
+			formattedTime = weekNumberStr
+		} else if strings.Contains(req.CustomFormat, "%U") {
+			// 包含%U的复杂格式
+			weekNumber := utils.GetWeekNumberInYear(inputTime, false) // false表示以周日为开始
+			
+			// 确保是两位数格式
+			weekNumberStr := strconv.Itoa(weekNumber)
+			if weekNumber < 10 {
+				weekNumberStr = "0" + weekNumberStr
+			}
+			
+			// 使用特殊占位符替换%U
+			const placeholder = "WEEKNUMBER_PLACEHOLDER_U"
+			tempFormat := strings.Replace(req.CustomFormat, "%U", placeholder, -1)
+			
+			// 转换其他Python格式为Go格式
+			goFormat := convertPythonFormatToGo(tempFormat)
+			
+			// 使用Go的时间格式化
+			tempResult := inputTime.Format(goFormat)
+			
+			// 最后将占位符替换为实际的周数
+			formattedTime = strings.Replace(tempResult, placeholder, weekNumberStr, -1)
+		} else if strings.Contains(req.CustomFormat, "%w") {
+			// 使用手动替换方法处理包含%w的格式
+			// 首先替换所有格式标记
+			result := req.CustomFormat
+			
+			// 处理年份
+			if strings.Contains(result, "%Y") {
+				result = strings.Replace(result, "%Y", strconv.Itoa(inputTime.Year()), -1)
+			}
+			
+			// 处理月份
+			if strings.Contains(result, "%m") {
+				month := int(inputTime.Month())
+				monthStr := strconv.Itoa(month)
+				if month < 10 {
+					monthStr = "0" + monthStr
+				}
+				result = strings.Replace(result, "%m", monthStr, -1)
+			}
+			
+			// 处理日期
+			if strings.Contains(result, "%d") {
+				day := inputTime.Day()
+				dayStr := strconv.Itoa(day)
+				if day < 10 {
+					dayStr = "0" + dayStr
+				}
+				result = strings.Replace(result, "%d", dayStr, -1)
+			}
+			
+			// 处理小时（24小时制）
+			if strings.Contains(result, "%H") {
+				hour := inputTime.Hour()
+				hourStr := strconv.Itoa(hour)
+				if hour < 10 {
+					hourStr = "0" + hourStr
+				}
+				result = strings.Replace(result, "%H", hourStr, -1)
+			}
+			
+			// 处理分钟
+			if strings.Contains(result, "%M") {
+				minute := inputTime.Minute()
+				minuteStr := strconv.Itoa(minute)
+				if minute < 10 {
+					minuteStr = "0" + minuteStr
+				}
+				result = strings.Replace(result, "%M", minuteStr, -1)
+			}
+			
+			// 处理秒
+			if strings.Contains(result, "%S") {
+				second := inputTime.Second()
+				secondStr := strconv.Itoa(second)
+				if second < 10 {
+					secondStr = "0" + secondStr
+				}
+				result = strings.Replace(result, "%S", secondStr, -1)
+			}
+			
+			// 最后处理星期几
+			weekday := int(inputTime.Weekday())
+			weekdayStr := strconv.Itoa(weekday)
+			result = strings.Replace(result, "%w", weekdayStr, -1)
+			
+			formattedTime = result
+		} else {
+			// 不包含%w的自定义格式
+			goFormat := convertPythonFormatToGo(req.CustomFormat)
+			formattedTime = inputTime.Format(goFormat)
+		}
+	} else {
+		// 非自定义格式
+		formattedTime = formatTime(inputTime, req.OutputFormat, req.CustomFormat)
+	}
 	
 	return &model.TimeConvertResponse{
 		Original:     originalStr,

@@ -54,7 +54,7 @@ func startCleanupRoutine() {
 func RateLimiterMiddleware() gin.HandlerFunc {
 	// 获取配置的请求速率限制
 	rateLimit := config.GetRateLimit()
-	
+
 	// 仅启动一次清理例程
 	cleanupOnce.Do(startCleanupRoutine)
 
